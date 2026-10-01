@@ -10,9 +10,9 @@ workflows:
                distribution_type: app_store
                bundle_identifier: com.tarasnevkilyi.unlock
             vars:
-              BUNDLE_ID: com.richarddumontpierre.play
-              XCODE_PROJECT: "ReelsTokenUpdate.xcodeproj"
-              XCODE_SCHEME: "ReelsTokenUpdate"
+              BUNDLE_ID: com.tarasnevkilyi.unlock
+              XCODE_PROJECT: "ReelsTokenUnlock.xcodeproj"
+              XCODE_SCHEME: "ReelsTokenUnlock"
               APP_STORE_APPLE_ID: 6818258772
             xcode: latest
         scripts:
