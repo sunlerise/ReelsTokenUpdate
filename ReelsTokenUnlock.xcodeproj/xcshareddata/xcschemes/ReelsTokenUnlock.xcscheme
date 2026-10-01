@@ -16,8 +16,8 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "000000000000000100000000"
-               BuildableName = "MyApp.app"
-               BlueprintName = "MyApp"
+               BuildableName = "ReelsTokenUnlock.app"
+               BlueprintName = "ReelsTokenUnlock"
                ReferencedContainer = "container:ReelsTokenUnlock.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -46,8 +46,8 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "000000000000000100000000"
-            BuildableName = "MyApp.app"
-            BlueprintName = "MyApp"
+            BuildableName = "ReelsTokenUnlock.app"
+            BlueprintName = "ReelsTokenUnlock"
             ReferencedContainer = "container:ReelsTokenUnlock.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
@@ -63,8 +63,8 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "000000000000000100000000"
-            BuildableName = "MyApp.app"
-            BlueprintName = "MyApp"
+            BuildableName = "ReelsTokenUnlock.app"
+            BlueprintName = "ReelsTokenUnlock"
             ReferencedContainer = "container:ReelsTokenUnlock.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>

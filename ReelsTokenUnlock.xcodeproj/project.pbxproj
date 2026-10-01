@@ -12,7 +12,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		000000000000000000000120 /* MyApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MyApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		000000000000000000000120 /* ReelsTokenUnlock.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ReelsTokenUnlock.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -45,7 +45,7 @@
 		000000000000000000000020 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				000000000000000000000120 /* MyApp.app */,
+				000000000000000000000120 /* ReelsTokenUnlock.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -53,9 +53,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		000000000000000100000000 /* MyApp */ = {
+		000000000000000100000000 /* ReelsTokenUnlock */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 000000000000000110000000 /* Build configuration list for PBXNativeTarget "MyApp" */;
+			buildConfigurationList = 000000000000000110000000 /* Build configuration list for PBXNativeTarget "ReelsTokenUnlock" */;
 			buildPhases = (
 				000000000000000120000000 /* Sources */,
 				000000000000000130000000 /* Frameworks */,
@@ -66,13 +66,13 @@
 			fileSystemSynchronizedGroups = (
 				000000000000000000000010 /* MyApp */,
 			);
-			name = MyApp;
+			name = ReelsTokenUnlock;
 			packageProductDependencies = (
 				ACDF7726306ED31B00600719 /* FirebaseCore */,
 				ACDF7728306ED31B00600719 /* FirebaseCrashlytics */,
 			);
 			productName = MyApp;
-			productReference = 000000000000000000000120 /* MyApp.app */;
+			productReference = 000000000000000000000120 /* ReelsTokenUnlock.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -107,7 +107,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				000000000000000100000000 /* MyApp */,
+				000000000000000100000000 /* ReelsTokenUnlock */,
 			);
 		};
 /* End PBXProject section */
@@ -261,9 +261,10 @@
 			};
 			name = Release;
 		};
-		000000000000000111000000 /* Debug configuration for PBXNativeTarget "MyApp" */ = {
+		000000000000000111000000 /* Debug configuration for PBXNativeTarget "ReelsTokenUnlock" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
@@ -304,9 +305,10 @@
 			};
 			name = Debug;
 		};
-		000000000000000112000000 /* Release configuration for PBXNativeTarget "MyApp" */ = {
+		000000000000000112000000 /* Release configuration for PBXNativeTarget "ReelsTokenUnlock" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
@@ -358,11 +360,11 @@
 			);
 			defaultConfigurationName = Release;
 		};
-		000000000000000110000000 /* Build configuration list for PBXNativeTarget "MyApp" */ = {
+		000000000000000110000000 /* Build configuration list for PBXNativeTarget "ReelsTokenUnlock" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				000000000000000111000000 /* Debug configuration for PBXNativeTarget "MyApp" */,
-				000000000000000112000000 /* Release configuration for PBXNativeTarget "MyApp" */,
+				000000000000000111000000 /* Debug configuration for PBXNativeTarget "ReelsTokenUnlock" */,
+				000000000000000112000000 /* Release configuration for PBXNativeTarget "ReelsTokenUnlock" */,
 			);
 			defaultConfigurationName = Release;
 		};
