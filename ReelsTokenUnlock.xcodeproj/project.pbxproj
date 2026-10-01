@@ -13,6 +13,7 @@
 
 /* Begin PBXFileReference section */
 		000000000000000000000120 /* ReelsTokenUnlock.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ReelsTokenUnlock.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		ACDF773E306EF3CD00600719 /* ReelsTokenUnlock-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "ReelsTokenUnlock-Info.plist"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -37,6 +38,7 @@
 		000000000000000000000001 = {
 			isa = PBXGroup;
 			children = (
+				ACDF773E306EF3CD00600719 /* ReelsTokenUnlock-Info.plist */,
 				000000000000000000000010 /* MyApp */,
 				000000000000000000000020 /* Products */,
 			);
@@ -273,6 +275,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "ReelsTokenUnlock-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = ReelsTokenUpdate;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
@@ -317,6 +320,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "ReelsTokenUnlock-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = ReelsTokenUpdate;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
