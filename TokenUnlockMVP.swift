@@ -1730,10 +1730,8 @@ struct MarkedMonthCalendar: View {
             .buttonStyle(.plain)
             .foregroundStyle(.primary)
 
-            // Eager Grid (not LazyVGrid): a lazy grid inside List reports 0 height,
-            // then its real height, so the Reminders tab jumps / can crash on device.
-            Grid(alignment: .center, horizontalSpacing: 0, verticalSpacing: 8) {
-                GridRow {
+            VStack(spacing: 8) {
+                HStack(spacing: 0) {
                     ForEach(Array(weekdaySymbols.enumerated()), id: \.offset) { _, symbol in
                         Text(symbol)
                             .font(.caption.weight(.semibold))
@@ -1742,7 +1740,7 @@ struct MarkedMonthCalendar: View {
                     }
                 }
                 ForEach(Array(monthWeeks.enumerated()), id: \.offset) { _, week in
-                    GridRow {
+                    HStack(spacing: 0) {
                         ForEach(week, id: \.self) { date in
                             dayCell(date)
                         }
@@ -1900,7 +1898,7 @@ struct CalendarView: View {
                 .listRowBackground(
                     RoundedRectangle(cornerRadius: 22, style: .continuous)
                         .fill(Color.white.opacity(0.08))
-                        .padding(.horizontal, 16) // Added spacing here too
+                        .padding(.horizontal, 16)
                         .padding(.vertical, 4)
                 )
                 .listRowSeparator(.hidden)
