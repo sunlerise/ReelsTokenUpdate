@@ -12,13 +12,56 @@ import SwiftUI
 import SwiftData
 import UserNotifications
 
+// #region agent log
+enum AgentLog {
+    static func write(_ hypothesisId: String, _ location: String, _ message: String, _ data: [String: Any] = [:]) {
+        let payload: [String: Any] = [
+            "sessionId": "47f410", "runId": "run1", "hypothesisId": hypothesisId,
+            "location": location, "message": message, "data": data,
+            "timestamp": Int(Date().timeIntervalSince1970 * 1000),
+        ]
+        guard let json = try? JSONSerialization.data(withJSONObject: payload),
+              let text = String(data: json, encoding: .utf8) else { return }
+        NSLog("AGENTLOG %@", text)
+        let line = Data((text + "\n").utf8)
+        // Primary path, plus /tmp fallback in case the Simulator can't write into ~/Documents.
+        for path in ["/Users/valeriaskoptsova/Documents/GitHub/ReelsTokenUpdate/.cursor/debug-47f410.log",
+                     "/tmp/debug-47f410.log"] {
+            try? FileManager.default.createDirectory(
+                atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            if let handle = FileHandle(forWritingAtPath: path) {
+                handle.seekToEndOfFile()
+                handle.write(line)
+                try? handle.close()
+            } else {
+                FileManager.default.createFile(atPath: path, contents: line)
+            }
+        }
+    }
+}
+// #endregion
+
 // MARK: - App entry
 
 @main
 struct TokenUnlockApp: App {
+    private let modelContainer: ModelContainer
+
     init() {
-        // Lets notifications show as banners while the app is open (handy for testing).
         UNUserNotificationCenter.current().delegate = NotificationDelegate.shared
+
+        let schema = Schema([Reminder.self, WatchedToken.self])
+        do {
+            modelContainer = try ModelContainer(for: schema)
+            // #region agent log
+            AgentLog.write("B", "TokenUnlockApp.init", "ModelContainer created", [:])
+            // #endregion
+        } catch {
+            // #region agent log
+            AgentLog.write("B", "TokenUnlockApp.init", "ModelContainer FAILED", ["error": "\(error)"])
+            // #endregion
+            fatalError("Could not create ModelContainer: \(error)")
+        }
     }
 
     var body: some Scene {
@@ -27,7 +70,7 @@ struct TokenUnlockApp: App {
                 .preferredColorScheme(.dark)
                 .tint(Brand.pink)
         }
-        .modelContainer(for: Reminder.self)
+        .modelContainer(modelContainer)
     }
 }
 
@@ -59,11 +102,49 @@ final class Reminder {
     }
 }
 
+/// A token on the watchlist: every upcoming unlock of it gets an alert.
+@Model
+final class WatchedToken {
+    @Attribute(.unique) var symbol: String
+    var coinName: String
+    var alertOffsetMinutes: Int
+    var createdAt: Date
+
+    init(symbol: String, coinName: String, alertOffsetMinutes: Int = ReminderOffset.oneDay.rawValue) {
+        self.symbol = symbol
+        self.coinName = coinName
+        self.alertOffsetMinutes = alertOffsetMinutes
+        self.createdAt = .now
+    }
+}
+
+extension ModelContext {
+    func toggleWatch(symbol: String, coinName: String, existing: WatchedToken?) {
+        if let existing {
+            delete(existing)
+        } else {
+            insert(WatchedToken(symbol: symbol, coinName: coinName))
+        }
+    }
+}
+
 // MARK: - Domain types
 
 struct Recipient: Hashable {
     let name: String
     let percent: Double // share of this unlock
+}
+
+enum UnlockSchedule: String, Hashable {
+    case cliff, monthly, quarterly
+
+    var label: String {
+        switch self {
+        case .cliff: "One-time cliff"
+        case .monthly: "Monthly vesting"
+        case .quarterly: "Quarterly vesting"
+        }
+    }
 }
 
 struct UnlockItem: Identifiable, Hashable {
@@ -75,6 +156,61 @@ struct UnlockItem: Identifiable, Hashable {
     let percentOfSupply: Double
     let recipients: [Recipient]
     let isConfirmed: Bool
+    // Optional so an item rebuilt from a saved Reminder snapshot still works.
+    var tokenAmount: Double?
+    var priceUSD: Double?
+    var priceChange24h: Double?
+    var percentOfCirculating: Double?
+    var schedule: UnlockSchedule?
+    var volume24hUSD: Double?
+}
+
+/// Rough sell-pressure estimate: how long the market needs to absorb the
+/// unlock at current volume, and how much it dilutes circulating supply.
+enum UnlockImpact: Int, Comparable {
+    case low, medium, high
+
+    static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+
+    var label: String {
+        switch self {
+        case .low: "Low impact"
+        case .medium: "Medium impact"
+        case .high: "High impact"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .low: .green
+        case .medium: .orange
+        case .high: Brand.hotPink
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .low: "Small next to daily trading. The market usually absorbs unlocks like this without much notice."
+        case .medium: "Noticeable supply. If recipients sell, it can weigh on price around the unlock date."
+        case .high: "Large next to daily trading and circulating supply. Unlocks like this often move the price."
+        }
+    }
+}
+
+extension UnlockItem {
+    /// Unlock value expressed in days of current 24h trading volume.
+    var daysOfVolume: Double? {
+        guard let volume24hUSD, volume24hUSD > 0 else { return nil }
+        return usdValue / volume24hUSD
+    }
+
+    var impact: UnlockImpact? {
+        guard let days = daysOfVolume else { return nil }
+        let dilution = percentOfCirculating ?? percentOfSupply
+        if days >= 1 || dilution >= 5 { return .high }
+        if days >= 0.15 || dilution >= 1.5 { return .medium }
+        return .low
+    }
 }
 
 /// Lightweight snapshot used by the reminder sheet (works for both an
@@ -132,65 +268,321 @@ protocol UnlockService: Sendable {
     func fetchUnlocks() async throws -> [UnlockItem]
 }
 
-/// Fake data. Dates are anchored to the start of today, so they stay stable
-/// during the day. Swap this for a real service later without touching the UI.
-/// All numbers are invented.
-struct MockUnlockService: UnlockService {
-    func fetchUnlocks() async throws -> [UnlockItem] {
-        try await Task.sleep(for: .milliseconds(600)) // simulate network
+// MARK: - API contract (what the backend is expected to return)
 
-        let cal = Calendar.current
-        let today = cal.startOfDay(for: .now)
-        func at(_ days: Int, _ hour: Int) -> Date {
-            let day = cal.date(byAdding: .day, value: days, to: today)!
-            return cal.date(bySettingHour: hour, minute: 0, second: 0, of: day)!
+/// snake_case JSON, ISO 8601 dates. The mock produces exactly these bytes,
+/// so a real service only needs `URLSession` + `UnlockAPI.decodeUnlocks`.
+struct UnlocksResponseDTO: Codable {
+    struct Meta: Codable {
+        let updatedAt: Date
+        let source: String
+    }
+    let data: [UnlockDTO]
+    let meta: Meta
+}
+
+struct UnlockDTO: Codable {
+    struct Token: Codable {
+        let name: String
+        let symbol: String
+        let priceUsd: Double
+        let priceChange24h: Double
+        let volume24hUsd: Double
+        let circulatingSupply: Double
+        let totalSupply: Double
+    }
+    struct Allocation: Codable {
+        let name: String
+        let percent: Double
+    }
+
+    let id: String
+    let token: Token
+    let unlockDate: Date
+    let amount: Double
+    let valueUsd: Double
+    let percentOfTotalSupply: Double
+    let percentOfCirculating: Double
+    let schedule: String // "cliff" | "monthly" | "quarterly"
+    let isConfirmed: Bool
+    let allocations: [Allocation]
+}
+
+enum UnlockAPI {
+    private static let iso8601: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let iso8601Fallback: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
+    static var encoder: JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        encoder.dateEncodingStrategy = .custom { date, encoder in
+            var container = encoder.singleValueContainer()
+            try container.encode(iso8601.string(from: date))
+        }
+        return encoder
+    }
+
+    static var decoder: JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let value = try container.decode(String.self)
+            if let date = iso8601.date(from: value) ?? iso8601Fallback.date(from: value) {
+                return date
+            }
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Unrecognized ISO8601 date: \(value)"
+            )
+        }
+        return decoder
+    }
+
+    static func items(from response: UnlocksResponseDTO) -> [UnlockItem] {
+        response.data.map(UnlockItem.init(dto:))
+    }
+
+    /// Real backend entry point once networking is wired up.
+    static func decodeUnlocks(_ data: Data) throws -> [UnlockItem] {
+        try items(from: decoder.decode(UnlocksResponseDTO.self, from: data))
+    }
+}
+
+extension UnlockItem {
+    init(dto: UnlockDTO) {
+        self.init(
+            id: dto.id,
+            coinName: dto.token.name,
+            symbol: dto.token.symbol,
+            date: dto.unlockDate,
+            usdValue: dto.valueUsd,
+            percentOfSupply: dto.percentOfTotalSupply,
+            recipients: dto.allocations.map { Recipient(name: $0.name, percent: $0.percent) },
+            isConfirmed: dto.isConfirmed,
+            tokenAmount: dto.amount,
+            priceUSD: dto.token.priceUsd,
+            priceChange24h: dto.token.priceChange24h,
+            percentOfCirculating: dto.percentOfCirculating,
+            schedule: UnlockSchedule(rawValue: dto.schedule) ?? .cliff,
+            volume24hUSD: dto.token.volume24hUsd
+        )
+    }
+}
+
+// MARK: - Mock backend
+
+/// Simulated backend. Expands vesting schedules modelled on real tokens
+/// (amounts approximate, prices/supply from CoinGecko, Oct 2026) into unlock
+/// events for the next ~8 months, then round-trips them through JSON.
+/// Also simulates latency, small price moves between refreshes and the odd
+/// network failure (never on the first request, so launch always works).
+final class MockUnlockService: UnlockService {
+    private let failureRate: Double
+    private var requestCount = 0
+
+    /// Set above 0 to simulate flaky network on pull-to-refresh (never on first load).
+    init(failureRate: Double = 0) {
+        self.failureRate = failureRate
+    }
+
+    func fetchUnlocks() async throws -> [UnlockItem] {
+        requestCount += 1
+        try await Task.sleep(for: .milliseconds(Int.random(in: 350...1100)))
+
+        if requestCount > 1, failureRate > 0, Double.random(in: 0..<1) < failureRate {
+            let failures: [(URLError.Code, String)] = [
+                (.timedOut, "The request timed out."),
+                (.notConnectedToInternet, "The Internet connection appears to be offline."),
+                (.networkConnectionLost, "The network connection was lost."),
+            ]
+            let (code, message) = failures.randomElement()!
+            throw URLError(code, userInfo: [NSLocalizedDescriptionKey: message])
         }
 
-        let items: [UnlockItem] = [
-            UnlockItem(id: "arb", coinName: "Arbitrum", symbol: "ARB", date: at(2, 14),
-                       usdValue: 41_200_000, percentOfSupply: 2.1,
-                       recipients: [Recipient(name: "Investors", percent: 52),
-                                    Recipient(name: "Team", percent: 35),
-                                    Recipient(name: "DAO treasury", percent: 13)],
-                       isConfirmed: true),
-            UnlockItem(id: "apt", coinName: "Aptos", symbol: "APT", date: at(5, 9),
-                       usdValue: 48_000_000, percentOfSupply: 1.8,
-                       recipients: [Recipient(name: "Core contributors", percent: 45),
-                                    Recipient(name: "Investors", percent: 40),
-                                    Recipient(name: "Community", percent: 15)],
-                       isConfirmed: true),
-            UnlockItem(id: "sui", coinName: "Sui", symbol: "SUI", date: at(9, 0),
-                       usdValue: 130_000_000, percentOfSupply: 3.4,
-                       recipients: [Recipient(name: "Series A/B investors", percent: 50),
-                                    Recipient(name: "Mysten Labs", percent: 50)],
-                       isConfirmed: true),
-            UnlockItem(id: "tia", coinName: "Celestia", symbol: "TIA", date: at(14, 12),
-                       usdValue: 22_500_000, percentOfSupply: 2.6,
-                       recipients: [Recipient(name: "Early backers", percent: 60),
-                                    Recipient(name: "Core contributors", percent: 40)],
-                       isConfirmed: false),
-            UnlockItem(id: "op", coinName: "Optimism", symbol: "OP", date: at(20, 0),
-                       usdValue: 36_800_000, percentOfSupply: 2.3,
-                       recipients: [Recipient(name: "Investors", percent: 55),
-                                    Recipient(name: "Core contributors", percent: 45)],
-                       isConfirmed: true),
-            UnlockItem(id: "strk", coinName: "Starknet", symbol: "STRK", date: at(27, 15),
-                       usdValue: 62_000_000, percentOfSupply: 4.1,
-                       recipients: [Recipient(name: "Early contributors", percent: 50),
-                                    Recipient(name: "Investors", percent: 50)],
-                       isConfirmed: true),
-            UnlockItem(id: "sei", coinName: "Sei", symbol: "SEI", date: at(35, 8),
-                       usdValue: 18_400_000, percentOfSupply: 1.9,
-                       recipients: [Recipient(name: "Private investors", percent: 70),
-                                    Recipient(name: "Team", percent: 30)],
-                       isConfirmed: false),
-            UnlockItem(id: "zk", coinName: "ZKsync", symbol: "ZK", date: at(45, 10),
-                       usdValue: 55_000_000, percentOfSupply: 3.9,
-                       recipients: [Recipient(name: "Investors", percent: 49),
-                                    Recipient(name: "Team", percent: 51)],
-                       isConfirmed: true),
-        ]
-        return items.sorted { $0.date < $1.date }
+        let response = MockCatalog.response(now: .now)
+        guard !response.data.isEmpty else {
+            throw URLError(.cannotDecodeContentData,
+                           userInfo: [NSLocalizedDescriptionKey: "Mock catalog returned no unlocks."])
+        }
+
+        // Build domain models from the DTO (always). Round-trip JSON in debug to
+        // catch contract drift before a real API is plugged in.
+        let items = UnlockAPI.items(from: response)
+        #if DEBUG
+        do {
+            let json = try UnlockAPI.encoder.encode(response)
+            _ = try UnlockAPI.decodeUnlocks(json)
+        } catch {
+            print("Mock JSON contract mismatch (mock still loads):", error)
+        }
+        #endif
+        return items
+    }
+}
+
+private struct VestingSchedule {
+    let name: String
+    let symbol: String
+    let kind: UnlockSchedule
+    /// Months (1-12) the unlock happens in; nil means every month.
+    let months: Set<Int>?
+    /// Day of month, clamped to the month's length (e.g. 30 → Feb 28).
+    let day: Int
+    let hourUTC: Int
+    let amount: Double
+    let price: Double
+    let volume24h: Double
+    let circulating: Double
+    let total: Double
+    let allocations: [UnlockDTO.Allocation]
+    var isConfirmed = true
+}
+
+private enum MockCatalog {
+    static let horizonDays = 240.0
+    /// Events further out than this are flagged as estimates.
+    static let confirmedWithinDays = 120.0
+
+    static func response(now: Date) -> UnlocksResponseDTO {
+        let end = now.addingTimeInterval(horizonDays * 86_400)
+        let dayKey = now.formatted(.iso8601.year().month().day())
+        var events: [UnlockDTO] = []
+
+        for s in schedules {
+            // Same 24h move all day, plus a little jitter on every refresh.
+            var rng = SeededGenerator(seed: "\(s.symbol)-\(dayKey)")
+            let change24h = Double.random(in: -9...9, using: &rng)
+            let price = s.price * (1 + change24h / 100) * Double.random(in: 0.995...1.005)
+            let volume = s.volume24h * Double.random(in: 0.75...1.25, using: &rng)
+                * Double.random(in: 0.98...1.02)
+
+            var circulating = s.circulating
+            for date in occurrences(of: s, after: now, until: end) {
+                let isConfirmed = s.isConfirmed
+                    && date.timeIntervalSince(now) < confirmedWithinDays * 86_400
+                events.append(UnlockDTO(
+                    id: "\(s.symbol.lowercased())-\(date.formatted(.iso8601.year().month().day()))",
+                    token: .init(name: s.name, symbol: s.symbol, priceUsd: price,
+                                 priceChange24h: change24h, volume24hUsd: volume,
+                                 circulatingSupply: s.circulating,
+                                 totalSupply: s.total),
+                    unlockDate: date,
+                    amount: s.amount,
+                    valueUsd: s.amount * price,
+                    percentOfTotalSupply: s.amount / s.total * 100,
+                    percentOfCirculating: s.amount / circulating * 100,
+                    schedule: s.kind.rawValue,
+                    isConfirmed: isConfirmed,
+                    allocations: s.allocations
+                ))
+                circulating += s.amount
+            }
+        }
+
+        events.sort { ($0.unlockDate, -$0.valueUsd) < ($1.unlockDate, -$1.valueUsd) }
+        return UnlocksResponseDTO(data: events, meta: .init(updatedAt: now, source: "mock"))
+    }
+
+    private static func occurrences(of s: VestingSchedule, after now: Date, until end: Date) -> [Date] {
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        let thisMonth = utc.date(from: utc.dateComponents([.year, .month], from: now))!
+
+        return (0..<9).compactMap { offset -> Date? in
+            guard let monthStart = utc.date(byAdding: .month, value: offset, to: thisMonth) else { return nil }
+            let comps = utc.dateComponents([.year, .month], from: monthStart)
+            if let months = s.months, !months.contains(comps.month!) { return nil }
+            let daysInMonth = utc.range(of: .day, in: .month, for: monthStart)!.count
+            let date = utc.date(from: DateComponents(
+                year: comps.year, month: comps.month, day: min(s.day, daysInMonth), hour: s.hourUTC))!
+            return date > now && date <= end ? date : nil
+        }
+    }
+
+    private static func split(_ parts: (String, Double)...) -> [UnlockDTO.Allocation] {
+        parts.map { UnlockDTO.Allocation(name: $0.0, percent: $0.1) }
+    }
+
+    static let schedules: [VestingSchedule] = [
+        VestingSchedule(name: "Arbitrum", symbol: "ARB", kind: .monthly, months: nil, day: 16, hourUTC: 13,
+                        amount: 92_650_000, price: 0.2015, volume24h: 179_000_000, circulating: 6_785_574_605, total: 10_000_000_000,
+                        allocations: split(("Team & advisors", 60.6), ("Investors", 39.4))),
+        VestingSchedule(name: "Aptos", symbol: "APT", kind: .monthly, months: nil, day: 12, hourUTC: 0,
+                        amount: 11_310_000, price: 0.8085, volume24h: 66_500_000, circulating: 871_172_141, total: 1_209_612_277,
+                        allocations: split(("Community", 34), ("Core contributors", 29),
+                                           ("Investors", 19), ("Foundation", 18))),
+        VestingSchedule(name: "Sui", symbol: "SUI", kind: .monthly, months: nil, day: 1, hourUTC: 0,
+                        amount: 44_000_000, price: 1.17, volume24h: 724_000_000, circulating: 4_118_270_447, total: 10_000_000_000,
+                        allocations: split(("Series B investors", 30), ("Series A investors", 25),
+                                           ("Early contributors", 25), ("Mysten Labs", 20))),
+        VestingSchedule(name: "Optimism", symbol: "OP", kind: .monthly, months: nil, day: 30, hourUTC: 0,
+                        amount: 31_340_000, price: 0.1354, volume24h: 87_300_000, circulating: 2_299_624_975, total: 4_294_967_296,
+                        allocations: split(("Core contributors", 54), ("Investors", 46))),
+        VestingSchedule(name: "Starknet", symbol: "STRK", kind: .monthly, months: nil, day: 15, hourUTC: 0,
+                        amount: 127_000_000, price: 0.0486, volume24h: 68_300_000, circulating: 7_421_949_505, total: 10_000_000_000,
+                        allocations: split(("Early contributors", 50.4), ("Investors", 49.6))),
+        VestingSchedule(name: "Sei", symbol: "SEI", kind: .monthly, months: nil, day: 15, hourUTC: 12,
+                        amount: 55_560_000, price: 0.0707, volume24h: 50_400_000, circulating: 6_733_333_333, total: 10_000_000_000,
+                        allocations: split(("Ecosystem reserve", 50), ("Team", 30), ("Private investors", 20))),
+        VestingSchedule(name: "Ethena", symbol: "ENA", kind: .monthly, months: nil, day: 2, hourUTC: 8,
+                        amount: 171_880_000, price: 0.2341, volume24h: 283_000_000, circulating: 10_095_312_500, total: 15_000_000_000,
+                        allocations: split(("Core contributors", 56), ("Investors", 44))),
+        VestingSchedule(name: "ZKsync", symbol: "ZK", kind: .monthly, months: nil, day: 17, hourUTC: 0,
+                        amount: 173_000_000, price: 0.0130, volume24h: 11_700_000, circulating: 10_816_539_153, total: 21_000_000_000,
+                        allocations: split(("Team", 51), ("Investors", 49))),
+        VestingSchedule(name: "Celestia", symbol: "TIA", kind: .monthly, months: nil, day: 30, hourUTC: 14,
+                        amount: 16_200_000, price: 0.4766, volume24h: 78_000_000, circulating: 976_303_634, total: 1_178_536_352,
+                        allocations: split(("Early backers", 60), ("Core contributors", 40)),
+                        isConfirmed: false),
+        VestingSchedule(name: "dYdX", symbol: "DYDX", kind: .monthly, months: nil, day: 1, hourUTC: 15,
+                        amount: 8_330_000, price: 0.1516, volume24h: 8_100_000, circulating: 846_094_216, total: 958_342_751,
+                        allocations: split(("Investors", 65), ("Founders & employees", 35))),
+        VestingSchedule(name: "Jupiter", symbol: "JUP", kind: .monthly, months: nil, day: 28, hourUTC: 16,
+                        amount: 53_470_000, price: 0.3301, volume24h: 67_100_000, circulating: 3_319_369_204, total: 6_861_486_482,
+                        allocations: split(("Team", 100))),
+        VestingSchedule(name: "Avalanche", symbol: "AVAX", kind: .quarterly, months: [2, 5, 8, 11], day: 23, hourUTC: 0,
+                        amount: 1_670_000, price: 11.07, volume24h: 492_000_000, circulating: 443_231_081, total: 469_899_771,
+                        allocations: split(("Team", 50), ("Foundation", 25), ("Strategic partners", 25))),
+        VestingSchedule(name: "Ondo", symbol: "ONDO", kind: .cliff, months: [1], day: 18, hourUTC: 0,
+                        amount: 1_940_000_000, price: 0.4922, volume24h: 176_600_000, circulating: 4_869_330_647, total: 10_000_000_000,
+                        allocations: split(("Ecosystem growth", 40), ("Protocol development", 30),
+                                           ("Private sales", 30))),
+        VestingSchedule(name: "Wormhole", symbol: "W", kind: .cliff, months: [4], day: 3, hourUTC: 0,
+                        amount: 1_280_000_000, price: 0.0138, volume24h: 11_500_000, circulating: 6_586_023_610, total: 10_000_000_000,
+                        allocations: split(("Core contributors", 40), ("Ecosystem", 35), ("Strategic network", 25)),
+                        isConfirmed: false),
+        VestingSchedule(name: "Pyth Network", symbol: "PYTH", kind: .cliff, months: [5], day: 20, hourUTC: 14,
+                        amount: 2_130_000_000, price: 0.0781, volume24h: 23_200_000, circulating: 7_874_959_274, total: 10_000_000_000,
+                        allocations: split(("Ecosystem growth", 52), ("Publisher rewards", 18),
+                                           ("Private sales", 18), ("Protocol development", 12))),
+    ]
+}
+
+/// Deterministic RNG (SplitMix64 seeded with FNV-1a), so mock values stay
+/// stable for a given key. Swift's `Hasher` is randomized per launch.
+private struct SeededGenerator: RandomNumberGenerator {
+    private var state: UInt64
+
+    init(seed: String) {
+        state = seed.utf8.reduce(14_695_981_039_346_656_037) { ($0 ^ UInt64($1)) &* 1_099_511_628_211 }
+    }
+
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
     }
 }
 
@@ -202,6 +594,7 @@ final class UnlocksViewModel {
     var items: [UnlockItem] = []
     var isLoading = false
     var errorMessage: String?
+    var lastUpdated: Date?
 
     private let service: UnlockService
 
@@ -210,13 +603,24 @@ final class UnlocksViewModel {
     }
 
     func load() async {
+        if isLoading { return }
         isLoading = true
         defer { isLoading = false }
         do {
-            items = try await service.fetchUnlocks()
+            let fetched = try await service.fetchUnlocks()
+            items = fetched
+            lastUpdated = .now
             errorMessage = nil
+        } catch is CancellationError {
+            // View went away mid-refresh; keep whatever we already had.
+            return
         } catch {
-            errorMessage = error.localizedDescription
+            #if DEBUG
+            print("Unlock load failed:", error)
+            #endif
+            if items.isEmpty {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 }
@@ -256,20 +660,69 @@ enum NotificationScheduler {
             let fireDate = reminder.unlockDate.addingTimeInterval(-Double(offset) * 60)
             guard fireDate > .now else { continue }
 
-            let content = UNMutableNotificationContent()
-            content.title = "\(reminder.symbol) unlock \(ReminderOffset(rawValue: offset)?.leadText ?? "soon")"
-            content.body = "\(reminder.usdValue.compactUSD) (\(reminder.percentOfSupply.percentText) of supply) unlocks "
+            let body = "\(reminder.usdValue.compactUSD) (\(reminder.percentOfSupply.percentText) of supply) unlocks "
                 + reminder.unlockDate.formatted(date: .abbreviated, time: .shortened)
-            content.sound = .default
-
-            let comps = Calendar.current.dateComponents(
-                [.year, .month, .day, .hour, .minute, .second], from: fireDate)
-            let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
-            let request = UNNotificationRequest(
-                identifier: identifier(reminder.unlockID, offset),
-                content: content, trigger: trigger)
-            UNUserNotificationCenter.current().add(request)
+            UNUserNotificationCenter.current().add(request(
+                id: identifier(reminder.unlockID, offset), symbol: reminder.symbol,
+                offset: offset, body: body, fireDate: fireDate))
         }
+    }
+
+    // MARK: Watchlist
+
+    private static let watchPrefix = "watch-"
+    /// iOS keeps at most 64 pending notifications per app; leave room for
+    /// one-off reminders.
+    private static let maxWatchAlerts = 40
+
+    /// Replaces all watchlist alerts with one per upcoming unlock of each
+    /// watched token (nearest first). Unlocks that already have their own
+    /// reminder are skipped so nothing fires twice.
+    static func syncWatchlist(_ watched: [WatchedToken], items: [UnlockItem], skipping reminderIDs: Set<String>) async {
+        let center = UNUserNotificationCenter.current()
+        let stale = await center.pendingNotificationRequests()
+            .map(\.identifier)
+            .filter { $0.hasPrefix(watchPrefix) }
+        center.removePendingNotificationRequests(withIdentifiers: stale)
+
+        guard !watched.isEmpty, await requestAuthorization() else { return }
+
+        let offsets = Dictionary(watched.map { ($0.symbol, $0.alertOffsetMinutes) }, uniquingKeysWith: { a, _ in a })
+        let planned = items
+            .filter { !reminderIDs.contains($0.id) }
+            .compactMap { item -> (fireDate: Date, item: UnlockItem, offset: Int)? in
+                guard let offset = offsets[item.symbol] else { return nil }
+                let fireDate = item.date.addingTimeInterval(-Double(offset) * 60)
+                return fireDate > .now ? (fireDate, item, offset) : nil
+            }
+            .sorted { $0.fireDate < $1.fireDate }
+            .prefix(maxWatchAlerts)
+
+        for (fireDate, item, offset) in planned {
+            var body = "\(item.tokenAmount.map { "\($0.compactNumber) \(item.symbol)" } ?? item.symbol) "
+                + "(\(item.usdValue.compactUSD)) unlocks "
+                + item.date.formatted(date: .abbreviated, time: .shortened)
+            if let impact = item.impact {
+                body += ". \(impact.label)."
+            }
+            try? await center.add(request(
+                id: "\(watchPrefix)\(item.id)", symbol: item.symbol,
+                offset: offset, body: body, fireDate: fireDate, subtitle: "From your watchlist"))
+        }
+    }
+
+    private static func request(id: String, symbol: String, offset: Int, body: String,
+                                fireDate: Date, subtitle: String? = nil) -> UNNotificationRequest {
+        let content = UNMutableNotificationContent()
+        content.title = "\(symbol) unlock \(ReminderOffset(rawValue: offset)?.leadText ?? "soon")"
+        if let subtitle { content.subtitle = subtitle }
+        content.body = body
+        content.sound = .default
+
+        let comps = Calendar.current.dateComponents(
+            [.year, .month, .day, .hour, .minute, .second], from: fireDate)
+        let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
+        return UNNotificationRequest(identifier: id, content: content, trigger: trigger)
     }
 }
 
@@ -278,6 +731,10 @@ enum NotificationScheduler {
 extension Double {
     var compactUSD: String {
         // Currency + compact notation is iOS 18+. Abbreviate by hand for iOS 17.
+        "\(self < 0 ? "-" : "")$\(abs(self).compactNumber)"
+    }
+
+    var compactNumber: String {
         let absValue = abs(self)
         let (divisor, suffix): (Double, String) = {
             if absValue >= 1_000_000_000 { return (1_000_000_000, "B") }
@@ -286,8 +743,23 @@ extension Double {
             return (1, "")
         }()
         let number = (absValue / divisor).formatted(.number.precision(.fractionLength(0...1)))
-        return "\(self < 0 ? "-" : "")$\(number)\(suffix)"
+        return "\(self < 0 ? "-" : "")\(number)\(suffix)"
     }
+
+    var priceText: String {
+        formatted(.currency(code: "USD").precision(.significantDigits(2...4)))
+    }
+
+    /// `self` is a number of days of trading volume.
+    var tradingTimeText: String {
+        let hours = Int((self * 24).rounded())
+        if hours < 1 { return "under 1 hour of trading" }
+        if hours == 1 { return "1 hour of trading" }
+        if hours < 48 { return "\(hours) hours of trading" }
+        return "\(formatted(.number.precision(.fractionLength(1)))) days of trading"
+    }
+
+    var signedPercentText: String { String(format: "%+.1f%%", self) }
     var percentText: String { String(format: "%.1f%%", self) }
 }
 
@@ -401,15 +873,23 @@ struct PlayfulBackground: View {
 extension String {
     var coinIconURL: URL? {
         let urlString: String
+        let base = "https://coin-images.coingecko.com/coins/images/"
         switch self.uppercased() {
-        case "ARB": urlString = "https://assets.coingecko.com/coins/images/16547/large/arbitrum.png"
-        case "APT": urlString = "https://assets.coingecko.com/coins/images/26455/large/aptos_round.png"
-        case "SUI": urlString = "https://assets.coingecko.com/coins/images/26375/large/sui-ocean-square.png"
-        case "TIA": urlString = "https://assets.coingecko.com/coins/images/31967/large/celestia-logo.png"
-        case "OP":  urlString = "https://assets.coingecko.com/coins/images/25244/large/Optimism.png"
-        case "STRK": urlString = "https://assets.coingecko.com/coins/images/35043/large/starknet.png"
-        case "SEI": urlString = "https://assets.coingecko.com/coins/images/28205/large/Sei_Logo_-_Transparent.png"
-        case "ZK":  urlString = "https://assets.coingecko.com/coins/images/36047/large/zksync.jpeg"
+        case "ARB":  urlString = base + "16547/large/arb.jpg"
+        case "APT":  urlString = base + "26455/large/Aptos-Network-Profile-Picture_%281%29.png"
+        case "SUI":  urlString = base + "26375/large/sui-ocean-square.png"
+        case "TIA":  urlString = base + "31967/large/tia.jpg"
+        case "OP":   urlString = base + "25244/large/Token.png"
+        case "STRK": urlString = base + "26433/large/starknet.png"
+        case "SEI":  urlString = base + "28205/large/Sei_Logo_-_Transparent.png"
+        case "ZK":   urlString = base + "38043/large/ZKTokenBlack.png"
+        case "ENA":  urlString = base + "36530/large/ethena.png"
+        case "DYDX": urlString = base + "32594/large/dydx.png"
+        case "JUP":  urlString = base + "34188/large/jup.png"
+        case "AVAX": urlString = base + "12559/large/Avalanche_Circle_RedWhite_Trans.png"
+        case "ONDO": urlString = base + "26580/large/ONDO.png"
+        case "W":    urlString = base + "35087/large/W_Token_%283%29.png"
+        case "PYTH": urlString = base + "31924/large/pyth.png"
         default: return nil
         }
         return URL(string: urlString)
@@ -479,7 +959,7 @@ enum OnboardingContent {
             id: 1,
             symbol: "lock.open.fill",
             title: "What’s coming next",
-            subtitle: "Browse upcoming unlocks by week, month, or the really big ones. Confirmed dates and estimates are labeled so you know what’s solid."
+            subtitle: "Browse upcoming unlocks by week, month, or just the high-impact ones. Each unlock is sized against daily trading volume, so you can tell a ripple from a wave."
         ),
         OnboardingSlide(
             id: 2,
@@ -491,7 +971,7 @@ enum OnboardingContent {
             id: 3,
             symbol: "bell.badge.fill",
             title: "Never miss a cliff",
-            subtitle: "Set a reminder 15 minutes, 1 hour, or 1 day before. We’ll ping you so a surprise unlock doesn’t catch you off guard."
+            subtitle: "Star a token to get alerts for every unlock it has, or set a one-off reminder 15 minutes, 1 hour, or 1 day before."
         ),
         OnboardingSlide(
             id: 4,
@@ -660,6 +1140,16 @@ struct OnboardingSlidePage: View {
 struct RootView: View {
     @AppStorage(onboardingCompletedKey) private var hasCompletedOnboarding = false
     @State private var vm = UnlocksViewModel(service: MockUnlockService())
+    @Query private var watched: [WatchedToken]
+    @Query private var reminders: [Reminder]
+
+    /// Changes whenever watchlist alerts need rescheduling.
+    private var watchSyncKey: String {
+        [watched.map { "\($0.symbol):\($0.alertOffsetMinutes)" }.sorted().joined(separator: ","),
+         vm.items.map(\.id).joined(separator: ","),
+         reminders.map(\.unlockID).sorted().joined(separator: ",")]
+            .joined(separator: "|")
+    }
 
     var body: some View {
         Group {
@@ -678,6 +1168,15 @@ struct RootView: View {
         }
         .environment(vm)
         .valueAnimation(.easeInOut(duration: 0.4), value: hasCompletedOnboarding)
+        .task(id: hasCompletedOnboarding) {
+            guard hasCompletedOnboarding, vm.items.isEmpty else { return }
+            await vm.load()
+        }
+        .task(id: watchSyncKey) {
+            guard !vm.items.isEmpty else { return }
+            await NotificationScheduler.syncWatchlist(
+                watched, items: vm.items, skipping: Set(reminders.map(\.unlockID)))
+        }
     }
 }
 
@@ -687,15 +1186,28 @@ enum UnlockFilter: String, CaseIterable, Identifiable {
     case week = "Week"
     case month = "Month"
     case all = "All" // Замінили Big ($50M+) на логічне All
+    case watching = "Watching"
+    case highImpact = "High impact"
     var id: String { rawValue }
+
+    var systemImage: String? {
+        switch self {
+        case .watching: "star.fill"
+        case .highImpact: "flame.fill"
+        default: nil
+        }
+    }
 }
 
 struct UpcomingView: View {
     @Environment(UnlocksViewModel.self) private var vm
+    @Environment(\.modelContext) private var context
     @Query private var reminders: [Reminder]
+    @Query private var watched: [WatchedToken]
     @State private var filter: UnlockFilter = .month
 
     private var reminderIDs: Set<String> { Set(reminders.map(\.unlockID)) }
+    private var watchedSymbols: Set<String> { Set(watched.map(\.symbol)) }
 
     private var filtered: [UnlockItem] {
         let cal = Calendar.current
@@ -708,6 +1220,10 @@ struct UpcomingView: View {
             return vm.items.filter { $0.date < end }
         case .all: // Повертаємо всі дані
             return vm.items
+        case .watching:
+            return vm.items.filter { watchedSymbols.contains($0.symbol) }
+        case .highImpact:
+            return vm.items.filter { $0.impact == .high }
         }
     }
 
@@ -720,18 +1236,23 @@ struct UpcomingView: View {
                             Button {
                                 filter = option
                             } label: {
-                                Text(option.rawValue)
-                                    .font(.subheadline.weight(.semibold))
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 8)
-                                    .foregroundStyle(filter == option ? Color.white : Color.white.opacity(0.7))
-                                    .background {
-                                        if filter == option {
-                                            Capsule().fill(Brand.accent)
-                                        } else {
-                                            Capsule().fill(Color.white.opacity(0.08))
-                                        }
+                                HStack(spacing: 5) {
+                                    if let systemImage = option.systemImage {
+                                        Image(systemName: systemImage).font(.caption)
                                     }
+                                    Text(option.rawValue)
+                                }
+                                .font(.subheadline.weight(.semibold))
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .foregroundStyle(filter == option ? Color.white : Color.white.opacity(0.7))
+                                .background {
+                                    if filter == option {
+                                        Capsule().fill(Brand.accent)
+                                    } else {
+                                        Capsule().fill(Color.white.opacity(0.08))
+                                    }
+                                }
                             }
                             .buttonStyle(.plain)
                         }
@@ -740,20 +1261,52 @@ struct UpcomingView: View {
                     .padding(.vertical, 10)
                 }
 
-                List(filtered) { item in
-                    NavigationLink(value: item) {
-                        UnlockRow(item: item, hasReminder: reminderIDs.contains(item.id))
+                statusLine
+
+                List {
+                    if vm.isLoading && vm.items.isEmpty {
+                        ForEach(0..<6, id: \.self) { index in
+                            UnlockRow(item: .placeholder(index), hasReminder: false)
+                                .redacted(reason: .placeholder)
+                                .playfulCardRow()
+                        }
+                    } else {
+                        ForEach(filtered) { item in
+                            let watch = watched.first { $0.symbol == item.symbol }
+                            NavigationLink(value: item) {
+                                UnlockRow(item: item, hasReminder: reminderIDs.contains(item.id),
+                                          isWatched: watch != nil)
+                            }
+                            .playfulCardRow()
+                            .swipeActions(edge: .leading) {
+                                Button {
+                                    context.toggleWatch(symbol: item.symbol, coinName: item.coinName, existing: watch)
+                                } label: {
+                                    Label(watch == nil ? "Watch" : "Unwatch",
+                                          systemImage: watch == nil ? "star.fill" : "star.slash")
+                                }
+                                .tint(watch == nil ? Brand.purple : .gray)
+                            }
+                        }
                     }
-                    .playfulCardRow()
                 }
                 .listStyle(.plain)
                 .overlay {
                     if vm.isLoading && vm.items.isEmpty {
-                        ProgressView()
-                            .tint(Brand.pink)
+                        EmptyView()
                     } else if let error = vm.errorMessage, vm.items.isEmpty {
-                        ContentUnavailableView("Couldn't load", systemImage: "wifi.slash",
-                                               description: Text(error))
+                        ContentUnavailableView {
+                            Label("Couldn't load", systemImage: "wifi.slash")
+                        } description: {
+                            Text(error)
+                        } actions: {
+                            Button("Try again") { Task { await vm.load() } }
+                                .buttonStyle(.borderedProminent)
+                        }
+                    } else if filter == .watching && watched.isEmpty {
+                        ContentUnavailableView(
+                            "Your watchlist is empty", systemImage: "star",
+                            description: Text("Swipe right on an unlock or tap the star on its page to get alerts for every unlock of that token."))
                     } else if filtered.isEmpty {
                         ContentUnavailableView("No unlocks", systemImage: "lock.open")
                     }
@@ -763,14 +1316,56 @@ struct UpcomingView: View {
             .playfulScreen()
             .navigationTitle("Token Unlocks")
             .navigationDestination(for: UnlockItem.self) { UnlockDetailView(item: $0) }
-            .task { if vm.items.isEmpty { await vm.load() } }
         }
+    }
+
+    @ViewBuilder
+    private var statusLine: some View {
+        if vm.errorMessage != nil, !vm.items.isEmpty {
+            Label("Couldn't refresh. Pull down to try again.", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Brand.hotPink)
+                .padding(.bottom, 4)
+        } else if let lastUpdated = vm.lastUpdated {
+            TimelineView(.periodic(from: .now, by: 30)) { _ in
+                Text("Updated \(lastUpdated, format: .relative(presentation: .named))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.bottom, 4)
+        }
+    }
+}
+
+extension UnlockItem {
+    /// Stand-in content for skeleton rows while the first load is in flight.
+    static func placeholder(_ index: Int) -> UnlockItem {
+        UnlockItem(id: "placeholder-\(index)", coinName: "Loading token", symbol: "TKN",
+                   date: .now, usdValue: 12_300_000, percentOfSupply: 1.2,
+                   recipients: [], isConfirmed: true)
+    }
+}
+
+struct ImpactBadge: View {
+    let impact: UnlockImpact
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(impact.color)
+                .frame(width: 6, height: 6)
+            Text(impact.label)
+        }
+        .font(.caption2.weight(.semibold))
+        .foregroundStyle(impact.color)
+        .lineLimit(1)
     }
 }
 
 struct UnlockRow: View {
     let item: UnlockItem
     let hasReminder: Bool
+    var isWatched = false
 
     var body: some View {
         HStack(spacing: 12) {
@@ -780,6 +1375,11 @@ struct UnlockRow: View {
                 HStack(spacing: 6) {
                     Text(item.symbol)
                         .font(.headline.weight(.bold))
+                    if isWatched {
+                        Image(systemName: "star.fill")
+                            .font(.caption2)
+                            .foregroundStyle(Brand.accent)
+                    }
                     if !item.isConfirmed {
                         Text("Estimated")
                             .font(.caption2.weight(.semibold))
@@ -789,9 +1389,15 @@ struct UnlockRow: View {
                             .foregroundStyle(Brand.hotPink)
                     }
                 }
-                Text(item.coinName)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Text(item.coinName)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    if let impact = item.impact {
+                        ImpactBadge(impact: impact)
+                    }
+                }
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 4) {
@@ -813,12 +1419,33 @@ struct UnlockRow: View {
 
 // MARK: - Screen 2: Detail
 
+struct ImpactMeter: View {
+    let impact: UnlockImpact
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(0..<3) { level in
+                Capsule()
+                    .fill(level <= impact.rawValue ? impact.color : Color.white.opacity(0.1))
+                    .frame(height: 6)
+            }
+        }
+    }
+}
+
 struct UnlockDetailView: View {
     let item: UnlockItem
+    @Environment(\.modelContext) private var context
     @Query private var reminders: [Reminder]
+    @Query private var watchedTokens: [WatchedToken]
     @State private var showSheet = false
 
     private var existing: Reminder? { reminders.first { $0.unlockID == item.id } }
+    private var watch: WatchedToken? { watchedTokens.first { $0.symbol == item.symbol } }
+
+    private func toggleWatch() {
+        context.toggleWatch(symbol: item.symbol, coinName: item.coinName, existing: watch)
+    }
 
     var body: some View {
         List {
@@ -834,6 +1461,12 @@ struct UnlockDetailView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
+                    if let impact = item.impact {
+                        ImpactBadge(impact: impact)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(impact.color.opacity(0.15), in: Capsule())
+                    }
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
@@ -852,12 +1485,54 @@ struct UnlockDetailView: View {
                     Text(item.isConfirmed ? "Confirmed" : "Estimated")
                         .foregroundStyle(item.isConfirmed ? Brand.purple : Brand.hotPink)
                 }
+                if let schedule = item.schedule {
+                    LabeledContent("Type", value: schedule.label)
+                }
             }
             .playfulCardRow()
 
+            if let impact = item.impact, let days = item.daysOfVolume, let volume = item.volume24hUSD {
+                Section("Market impact") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(impact.label)
+                            .font(.headline)
+                            .foregroundStyle(impact.color)
+                        ImpactMeter(impact: impact)
+                        Text(impact.explanation)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                    LabeledContent("Same as", value: days.tradingTimeText)
+                    LabeledContent("24h volume", value: volume.compactUSD)
+                }
+                .playfulCardRow()
+            }
+
             Section("Size") {
+                if let tokenAmount = item.tokenAmount {
+                    LabeledContent("Tokens", value: "\(tokenAmount.compactNumber) \(item.symbol)")
+                }
                 LabeledContent("Value", value: item.usdValue.compactUSD)
-                LabeledContent("Share of supply", value: item.percentOfSupply.percentText)
+                if let price = item.priceUSD {
+                    LabeledContent("Price") {
+                        HStack(spacing: 6) {
+                            Text(price.priceText)
+                            if let change = item.priceChange24h {
+                                Text(change.signedPercentText)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(change >= 0 ? Color.green : Color.red)
+                            }
+                        }
+                    }
+                }
+                LabeledContent("Share of total supply", value: item.percentOfSupply.percentText)
+                if let circulating = item.percentOfCirculating {
+                    LabeledContent("Share of circulating") {
+                        Text(circulating.percentText)
+                            .foregroundStyle(circulating >= 5 ? Brand.hotPink : .secondary)
+                    }
+                }
             }
             .playfulCardRow()
 
@@ -883,6 +1558,31 @@ struct UnlockDetailView: View {
                         .frame(height: 8)
                     }
                     .padding(.vertical, 4)
+                }
+            }
+            .playfulCardRow()
+
+            Section("Watchlist") {
+                if let watch {
+                    Picker("Alert me", selection: Binding(
+                        get: { watch.alertOffsetMinutes },
+                        set: { watch.alertOffsetMinutes = $0 })) {
+                        ForEach(ReminderOffset.allCases) { option in
+                            Text(option.label).tag(option.rawValue)
+                        }
+                    }
+                    Text("You’ll get an alert before every upcoming \(item.symbol) unlock, not just this one.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Button("Remove from watchlist", role: .destructive, action: toggleWatch)
+                } else {
+                    Button(action: toggleWatch) {
+                        Label("Watch \(item.symbol)", systemImage: "star")
+                            .fontWeight(.semibold)
+                    }
+                    Text("Get an alert before every future \(item.symbol) unlock, not just this one.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
             .playfulCardRow()
@@ -917,6 +1617,15 @@ struct UnlockDetailView: View {
         .playfulScreen()
         .navigationTitle("\(item.symbol) · \(item.coinName)")
         .inlineNavigationTitle()
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button(action: toggleWatch) {
+                    Image(systemName: watch == nil ? "star" : "star.fill")
+                        .foregroundStyle(Brand.accent)
+                }
+                .accessibilityLabel(watch == nil ? "Watch \(item.symbol)" : "Unwatch \(item.symbol)")
+            }
+        }
         .sheet(isPresented: $showSheet) {
             ReminderSheet(target: item.target, existing: existing)
         }
@@ -1029,6 +1738,21 @@ struct MarkedMonthCalendar: View {
     private var calendar: Calendar { .current }
 
     var body: some View {
+        // #region agent log
+        let _ = AgentLog.write("A", "MarkedMonthCalendar.body:pre", "before weekdaySymbols/monthGrid", [
+            "calendarId": "\(calendar.identifier)", "locale": Locale.current.identifier,
+            "firstWeekday": calendar.firstWeekday,
+            "shortWeekdaySymbolsCount": calendar.shortWeekdaySymbols.count,
+            "visibleMonth": "\(visibleMonth)", "selectedDate": "\(selectedDate)",
+        ])
+        // #endregion
+        // #region agent log
+        let _ = AgentLog.write("A", "MarkedMonthCalendar.body:post", "after weekdaySymbols/monthGrid", [
+            "weekdaySymbols": weekdaySymbols, "uniqueWeekdaySymbols": Set(weekdaySymbols).count,
+            "gridCount": monthGrid.count, "uniqueGridCount": Set(monthGrid).count,
+            "marksCount": marks.count,
+        ])
+        // #endregion
         VStack(spacing: 12) {
             HStack {
                 Button {
@@ -1172,9 +1896,11 @@ struct CalendarView: View {
     @Environment(UnlocksViewModel.self) private var vm
     @Environment(\.modelContext) private var context
     @Query(sort: \Reminder.unlockDate) private var reminders: [Reminder]
+    @Query(sort: \WatchedToken.symbol) private var watched: [WatchedToken]
     @State private var selectedDate = Date()
 
     private var reminderIDs: Set<String> { Set(reminders.map(\.unlockID)) }
+    private var watchedSymbols: Set<String> { Set(watched.map(\.symbol)) }
 
     private var dayMarks: [Date: CalendarDayMark] {
         let cal = Calendar.current
@@ -1182,6 +1908,9 @@ struct CalendarView: View {
         for item in vm.items {
             let key = cal.startOfDay(for: item.date)
             marks[key, default: CalendarDayMark()].hasUnlock = true
+            if watchedSymbols.contains(item.symbol) {
+                marks[key, default: CalendarDayMark()].hasReminder = true
+            }
         }
         for reminder in reminders {
             let key = cal.startOfDay(for: reminder.unlockDate)
@@ -1195,6 +1924,12 @@ struct CalendarView: View {
     }
 
     var body: some View {
+        // #region agent log
+        let _ = AgentLog.write("B", "CalendarView.body", "body evaluated", [
+            "items": vm.items.count, "reminders": reminders.count, "watched": watched.count,
+            "dayMarks": dayMarks.count, "unlocksOnSelectedDay": unlocksOnSelectedDay.count,
+        ])
+        // #endregion
         NavigationStack {
             List {
                 Section {
@@ -1216,9 +1951,34 @@ struct CalendarView: View {
                     } else {
                         ForEach(unlocksOnSelectedDay) { item in
                             NavigationLink(value: item) {
-                                UnlockRow(item: item, hasReminder: reminderIDs.contains(item.id))
+                                UnlockRow(item: item, hasReminder: reminderIDs.contains(item.id),
+                                          isWatched: watchedSymbols.contains(item.symbol))
                             }
                             .playfulCardRow()
+                        }
+                    }
+                }
+
+                Section("Watchlist") {
+                    if watched.isEmpty {
+                        Text("Tap the star on any unlock to get alerts for every unlock of that token.")
+                            .foregroundStyle(.secondary)
+                            .playfulCardRow()
+                    } else {
+                        ForEach(watched) { token in
+                            Group {
+                                if let next = nextUnlock(of: token.symbol) {
+                                    NavigationLink(value: next) { watchRow(token) }
+                                } else {
+                                    watchRow(token)
+                                }
+                            }
+                            .playfulCardRow()
+                            .swipeActions {
+                                Button("Unwatch", role: .destructive) {
+                                    context.delete(token)
+                                }
+                            }
                         }
                     }
                 }
@@ -1246,8 +2006,10 @@ struct CalendarView: View {
             .listStyle(.plain)
             .playfulScreen()
             .navigationTitle("My Reminders")
+            // #region agent log
+            .onAppear { AgentLog.write("D", "CalendarView.onAppear", "list appeared (layout/render finished)", [:]) }
+            // #endregion
             .navigationDestination(for: UnlockItem.self) { UnlockDetailView(item: $0) }
-            .task { if vm.items.isEmpty { await vm.load() } }
         }
     }
 
@@ -1262,8 +2024,50 @@ struct CalendarView: View {
             }
             Spacer()
             Text(reminder.offsetsMinutes.sorted()
-                .map { $0 >= 1440 ? "\($0 / 1440)d" : $0 >= 60 ? "\($0 / 60)h" : "\($0)m" }
+                .map(shortOffset)
                 .joined(separator: " · "))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Brand.pink)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func shortOffset(_ minutes: Int) -> String {
+        minutes >= 1440 ? "\(minutes / 1440)d" : minutes >= 60 ? "\(minutes / 60)h" : "\(minutes)m"
+    }
+
+    private func nextUnlock(of symbol: String) -> UnlockItem? {
+        vm.items.first { $0.symbol == symbol && $0.date > .now }
+    }
+
+    private func watchRow(_ token: WatchedToken) -> some View {
+        let next = nextUnlock(of: token.symbol)
+        return HStack(spacing: 12) {
+            CoinBadge(symbol: token.symbol)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(token.symbol).font(.headline.weight(.bold))
+                    Image(systemName: "star.fill")
+                        .font(.caption2)
+                        .foregroundStyle(Brand.accent)
+                }
+                if let next {
+                    HStack(spacing: 8) {
+                        Text("Next \(next.date.formatted(.dateTime.month(.abbreviated).day())) · \(next.usdValue.compactUSD)")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        if let impact = next.impact {
+                            ImpactBadge(impact: impact)
+                        }
+                    }
+                } else {
+                    Text("No upcoming unlocks")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            Text(shortOffset(token.alertOffsetMinutes))
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(Brand.pink)
         }
