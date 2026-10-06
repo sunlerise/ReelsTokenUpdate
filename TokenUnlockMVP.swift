@@ -12,35 +12,6 @@ import SwiftUI
 import SwiftData
 import UserNotifications
 
-// #region agent log
-enum AgentLog {
-    static func write(_ hypothesisId: String, _ location: String, _ message: String, _ data: [String: Any] = [:]) {
-        let payload: [String: Any] = [
-            "sessionId": "47f410", "runId": "run1", "hypothesisId": hypothesisId,
-            "location": location, "message": message, "data": data,
-            "timestamp": Int(Date().timeIntervalSince1970 * 1000),
-        ]
-        guard let json = try? JSONSerialization.data(withJSONObject: payload),
-              let text = String(data: json, encoding: .utf8) else { return }
-        NSLog("AGENTLOG %@", text)
-        let line = Data((text + "\n").utf8)
-        // Primary path, plus /tmp fallback in case the Simulator can't write into ~/Documents.
-        for path in ["/Users/valeriaskoptsova/Documents/GitHub/ReelsTokenUpdate/.cursor/debug-47f410.log",
-                     "/tmp/debug-47f410.log"] {
-            try? FileManager.default.createDirectory(
-                atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-            if let handle = FileHandle(forWritingAtPath: path) {
-                handle.seekToEndOfFile()
-                handle.write(line)
-                try? handle.close()
-            } else {
-                FileManager.default.createFile(atPath: path, contents: line)
-            }
-        }
-    }
-}
-// #endregion
-
 // MARK: - App entry
 
 @main
@@ -53,13 +24,7 @@ struct TokenUnlockApp: App {
         let schema = Schema([Reminder.self, WatchedToken.self])
         do {
             modelContainer = try ModelContainer(for: schema)
-            // #region agent log
-            AgentLog.write("B", "TokenUnlockApp.init", "ModelContainer created", [:])
-            // #endregion
         } catch {
-            // #region agent log
-            AgentLog.write("B", "TokenUnlockApp.init", "ModelContainer FAILED", ["error": "\(error)"])
-            // #endregion
             fatalError("Could not create ModelContainer: \(error)")
         }
     }
@@ -1738,21 +1703,6 @@ struct MarkedMonthCalendar: View {
     private var calendar: Calendar { .current }
 
     var body: some View {
-        // #region agent log
-        let _ = AgentLog.write("A", "MarkedMonthCalendar.body:pre", "before weekdaySymbols/monthGrid", [
-            "calendarId": "\(calendar.identifier)", "locale": Locale.current.identifier,
-            "firstWeekday": calendar.firstWeekday,
-            "shortWeekdaySymbolsCount": calendar.shortWeekdaySymbols.count,
-            "visibleMonth": "\(visibleMonth)", "selectedDate": "\(selectedDate)",
-        ])
-        // #endregion
-        // #region agent log
-        let _ = AgentLog.write("A", "MarkedMonthCalendar.body:post", "after weekdaySymbols/monthGrid", [
-            "weekdaySymbols": weekdaySymbols, "uniqueWeekdaySymbols": Set(weekdaySymbols).count,
-            "gridCount": monthGrid.count, "uniqueGridCount": Set(monthGrid).count,
-            "marksCount": marks.count,
-        ])
-        // #endregion
         VStack(spacing: 12) {
             HStack {
                 Button {
@@ -1780,21 +1730,32 @@ struct MarkedMonthCalendar: View {
             .buttonStyle(.plain)
             .foregroundStyle(.primary)
 
-            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 0), count: 7), spacing: 8) {
-                ForEach(weekdaySymbols, id: \.self) { symbol in
-                    Text(symbol)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(Brand.purple)
-                        .frame(maxWidth: .infinity)
+            // Eager Grid (not LazyVGrid): a lazy grid inside List reports 0 height,
+            // then its real height, so the Reminders tab jumps / can crash on device.
+            Grid(alignment: .center, horizontalSpacing: 0, verticalSpacing: 8) {
+                GridRow {
+                    ForEach(Array(weekdaySymbols.enumerated()), id: \.offset) { _, symbol in
+                        Text(symbol)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Brand.purple)
+                            .frame(maxWidth: .infinity)
+                    }
                 }
-
-                ForEach(monthGrid, id: \.self) { date in
-                    dayCell(date)
+                ForEach(Array(monthWeeks.enumerated()), id: \.offset) { _, week in
+                    GridRow {
+                        ForEach(week, id: \.self) { date in
+                            dayCell(date)
+                        }
+                    }
                 }
             }
         }
         .padding(.vertical, 4)
-        .onAppear { visibleMonth = selectedDate }
+        .onAppear {
+            if !calendar.isDate(visibleMonth, equalTo: selectedDate, toGranularity: .month) {
+                visibleMonth = selectedDate
+            }
+        }
         .onChange(of: selectedDate) { _, newValue in
             if !calendar.isDate(newValue, equalTo: visibleMonth, toGranularity: .month) {
                 visibleMonth = newValue
@@ -1826,7 +1787,12 @@ struct MarkedMonthCalendar: View {
         while dates.count % 7 != 0 {
             dates.append(calendar.date(byAdding: .day, value: 1, to: dates.last!)!)
         }
-        return dates
+        return dates.map { calendar.startOfDay(for: $0) }
+    }
+
+    private var monthWeeks: [[Date]] {
+        let days = monthGrid
+        return stride(from: 0, to: days.count, by: 7).map { Array(days[$0 ..< min($0 + 7, days.count)]) }
     }
 
     private func dayCell(_ date: Date) -> some View {
@@ -1924,16 +1890,11 @@ struct CalendarView: View {
     }
 
     var body: some View {
-        // #region agent log
-        let _ = AgentLog.write("B", "CalendarView.body", "body evaluated", [
-            "items": vm.items.count, "reminders": reminders.count, "watched": watched.count,
-            "dayMarks": dayMarks.count, "unlocksOnSelectedDay": unlocksOnSelectedDay.count,
-        ])
-        // #endregion
         NavigationStack {
             List {
                 Section {
                     MarkedMonthCalendar(selectedDate: $selectedDate, marks: dayMarks)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .listRowInsets(EdgeInsets(top: 16, leading: 24, bottom: 16, trailing: 24))
                 .listRowBackground(
@@ -2006,9 +1967,6 @@ struct CalendarView: View {
             .listStyle(.plain)
             .playfulScreen()
             .navigationTitle("My Reminders")
-            // #region agent log
-            .onAppear { AgentLog.write("D", "CalendarView.onAppear", "list appeared (layout/render finished)", [:]) }
-            // #endregion
             .navigationDestination(for: UnlockItem.self) { UnlockDetailView(item: $0) }
         }
     }
